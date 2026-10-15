@@ -1,0 +1,452 @@
+### ====================================================================
+### QR-Link 接口自动化与边界用例测试文件 (PyCharm HTTP Client)
+### 使用方法：
+### 1. 点击每个请求左侧的 绿色三角 ▶️ 即可单独运行
+### 2. 请先按顺序运行 【第 0 部分】获取管理员与学生 Token，后续测试将自动复用 Token！
+### ====================================================================
+
+@baseUrl = http://127.0.0.1:8000
+
+
+### ====================================================================
+### 0. 准备工作：身份登录与 Token 自动提取
+### ====================================================================
+
+### 0.1 管理员登录 (admin) -> 自动保存 admin_token
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "student_id": "admin",
+  "password": "123456"
+}
+
+> {%
+    client.test("管理员登录成功", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+        client.assert(response.body.user.role === "ADMIN", "角色应为 ADMIN");
+    });
+    client.global.set("admin_token", response.body.access_token);
+%}
+
+
+### 0.2 测试学生A登录 (20240001) -> 自动保存 student_a_token
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "student_id": "20240001",
+  "password": "123456"
+}
+
+> {%
+    client.test("学生A登录成功", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+        client.assert(response.body.user.role === "USER", "角色应为 USER");
+    });
+    client.global.set("student_a_token", response.body.access_token);
+%}
+
+
+### 0.3 测试学生B登录 (20240002) -> 用于测试“越权/冒充他人”场景
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "student_id": "20240002",
+  "password": "123456"
+}
+
+> {%
+    client.test("学生B登录成功", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+    });
+    client.global.set("student_b_token", response.body.access_token);
+%}
+
+
+
+### ====================================================================
+### 接口 1: POST /api/rentals/checkout (执行借出操作)
+### ====================================================================
+
+### 1.1 [正常用例] 学生A借出空闲设备 (大疆无人机 AST-2026-0004) -> 预期 200 成功
+POST {{baseUrl}}/api/rentals/checkout
+Content-Type: application/json
+Authorization: Bearer {{student_a_token}}
+
+{
+  "asset_code": "AST-2026-0004",
+  "remark": "航模协会外场测绘使用"
+}
+
+> {%
+    client.test("借出成功并绑定当前学生", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+        client.assert(response.body.student_id === "20240001", "借阅人应为测试学生A");
+        client.assert(response.body.updated_status === "RENTED", "状态应更新为已借出");
+    });
+%}
+
+
+### 1.2 [边界异常] 重复借用“已被借出”的物资 -> 预期 400 拦截 (提示已被借用中)
+POST {{baseUrl}}/api/rentals/checkout
+Content-Type: application/json
+Authorization: Bearer {{student_b_token}}
+
+{
+  "asset_code": "AST-2026-0004",
+  "remark": "学生B想抢借刚被借走的无人机"
+}
+
+> {%
+    client.test("正确拦截重复借出", function() {
+        client.assert(response.status === 400, "已被借出的物品不能重复借");
+    });
+%}
+
+
+### 1.3 [边界异常] 借用“正在维修检修中”的物资 (AST-2026-0006) -> 预期 400 拦截
+POST {{baseUrl}}/api/rentals/checkout
+Content-Type: application/json
+Authorization: Bearer {{student_a_token}}
+
+{
+  "asset_code": "AST-2026-0006",
+  "remark": "尝试借用损坏维修中的电烙铁工具箱"
+}
+
+> {%
+    client.test("正确拦截维修中物资", function() {
+        client.assert(response.status === 400, "维修中物资不可借");
+    });
+%}
+
+
+### 1.4 [边界异常] 借用一个根本不存在的物资编号 -> 预期 404 资产不存在
+POST {{baseUrl}}/api/rentals/checkout
+Content-Type: application/json
+Authorization: Bearer {{student_a_token}}
+
+{
+  "asset_code": "FAKE-CODE-99999",
+  "remark": "不存在的设备"
+}
+
+> {%
+    client.test("正确报404不存在", function() {
+        client.assert(response.status === 404, "不存在的编号应返回 404");
+    });
+%}
+
+
+### 1.5 [权限异常] 未登录 (不带 Token) 尝试借出 -> 预期 401 未登录拦截
+POST {{baseUrl}}/api/rentals/checkout
+Content-Type: application/json
+
+{
+  "asset_code": "AST-2026-0003",
+  "remark": "游客尝试偷借"
+}
+
+> {%
+    client.test("未登录应被401拦截", function() {
+        client.assert(response.status === 401, "未认证用户不可借出");
+    });
+%}
+
+
+### 1.6 [管理员特权] 管理员代他人办理借出 (指定 user_id=3 测试学生B) -> 预期 200 成功
+POST {{baseUrl}}/api/rentals/checkout
+Content-Type: application/json
+Authorization: Bearer {{admin_token}}
+
+{
+  "asset_code": "AST-2026-0003",
+  "user_id": 3,
+  "remark": "管理员在后台人工协助办理借调"
+}
+
+> {%
+    client.test("管理员代借成功", function() {
+        client.assert(response.status === 200, "管理员代还应返回 200");
+        client.assert(response.body.user_id === 3, "借阅人ID应为3");
+    });
+%}
+
+
+
+### ====================================================================
+### 接口 2: POST /api/rentals/checkin (执行归还操作)
+### ====================================================================
+
+### 2.1 [越权拦截] 学生B尝试归还学生A借的无人机 (AST-2026-0004) -> 预期 403 权限拒绝 (非本人不可还)
+POST {{baseUrl}}/api/rentals/checkin
+Content-Type: application/json
+Authorization: Bearer {{student_b_token}}
+
+{
+  "asset_code": "AST-2026-0004",
+  "remark": "学生B冒名顶替归还他人设备"
+}
+
+> {%
+    client.test("正确拦截冒名顶替归还", function() {
+        client.assert(response.status === 403, "非借阅人归效应被 403 拒绝");
+    });
+%}
+
+
+### 2.2 [正常用例] 借阅人学生A本人归还无人机 (AST-2026-0004) -> 预期 200 成功并补充归还时间
+POST {{baseUrl}}/api/rentals/checkin
+Content-Type: application/json
+Authorization: Bearer {{student_a_token}}
+
+{
+  "asset_code": "AST-2026-0004",
+  "remark": "使用完毕，机身及螺旋桨完好归还"
+}
+
+> {%
+    client.test("本人归还成功", function() {
+        client.assert(response.status === 200, "归还应成功 200");
+        client.assert(response.body.return_time !== null, "归还时间戳必须已填充");
+        client.assert(response.body.updated_status === "AVAILABLE", "状态应恢复为可用");
+    });
+%}
+
+
+### 2.3 [边界异常] 归还一个根本没有被借出的物品 -> 预期 400 报错 (并非借出状态无需归还)
+POST {{baseUrl}}/api/rentals/checkin
+Content-Type: application/json
+Authorization: Bearer {{student_a_token}}
+
+{
+  "asset_code": "AST-2026-0004",
+  "remark": "刚还完又重新归还一次"
+}
+
+> {%
+    client.test("重复归还拦截", function() {
+        client.assert(response.status === 400, "空闲物品无需重复归还");
+    });
+%}
+
+
+### 2.4 [管理员特权] 管理员兜底强制归还任何在借设备 (如刚才代借的 AST-2026-0003) -> 预期 200 成功
+POST {{baseUrl}}/api/rentals/checkin
+Content-Type: application/json
+Authorization: Bearer {{admin_token}}
+
+{
+  "asset_code": "AST-2026-0003",
+  "remark": "管理员例行巡检统一入库归还"
+}
+
+> {%
+    client.test("管理员强制交还成功", function() {
+        client.assert(response.status === 200, "管理员有权归还任意设备");
+    });
+%}
+
+
+
+### ====================================================================
+### 接口 3: GET /api/rentals/my-active (查询我当前借用中的器材)
+### ====================================================================
+
+### 3.1 [正常用例] 查询学生A手头在借的物品 -> 预期 200 (应包含系统预置在借的树莓派 AST-2026-0002)
+GET {{baseUrl}}/api/rentals/my-active
+Authorization: Bearer {{student_a_token}}
+
+> {%
+    client.test("个人在借列表返回正常", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+        client.assert(response.body.length >= 1, "学生A应有在借物资");
+        client.assert(response.body[0].asset_code === "AST-2026-0002", "应包含预置的树莓派");
+    });
+%}
+
+
+### 3.2 [空列表场景] 查询没有借任何物品的学生B -> 预期 200 且列表为空数组 []
+GET {{baseUrl}}/api/rentals/my-active
+Authorization: Bearer {{student_b_token}}
+
+> {%
+    client.test("无在借器材返回空数组", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+        client.assert(response.body.length === 0, "当前不应有在借物品");
+    });
+%}
+
+
+### 3.3 [未登录场景] 不带 Token 查询 -> 预期 401 拦截
+GET {{baseUrl}}/api/rentals/my-active
+
+> {%
+    client.test("未登录拦截", function() {
+        client.assert(response.status === 401, "未登录不可查询个人中心");
+    });
+%}
+
+
+
+### ====================================================================
+### 接口 4: GET /api/rentals/logs (查询系统全局借还流水记录)
+### ====================================================================
+
+### 4.1 [正常用例] 管理员调取全校借还历史流水 (支持分页) -> 预期 200 成功
+GET {{baseUrl}}/api/rentals/logs?skip=0&limit=10
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("管理员查阅全局流水成功", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+        client.assert(response.body.length > 0, "应有流水记录");
+        client.assert(response.body[0].asset_name !== undefined, "应包含物资名称");
+    });
+%}
+
+
+### 4.2 [越权拦截] 普通学生尝试查阅全局审计流水 -> 预期 403 权限拒绝
+GET {{baseUrl}}/api/rentals/logs
+Authorization: Bearer {{student_a_token}}
+
+> {%
+    client.test("普通学生被403拦截", function() {
+        client.assert(response.status === 403, "普通学生禁止查阅全校审计日志");
+    });
+%}
+
+
+
+### ====================================================================
+### 接口 5: GET /api/stats/summary (获取全局核心指标概览)
+### ====================================================================
+
+### 5.1 [正常用例] 登录用户获取大屏核心数据 -> 预期 200 包含物资汇总统计
+GET {{baseUrl}}/api/stats/summary
+Authorization: Bearer {{student_a_token}}
+
+> {%
+    client.test("统计数据结构完备", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+        client.assert(response.body.total_assets >= 6, "总资产数应正确");
+        client.assert(response.body.available_assets !== undefined, "必须包含可用物资数");
+        client.assert(response.body.rented_assets !== undefined, "必须包含已借出数");
+        client.assert(response.body.maintenance_assets !== undefined, "必须包含维修数");
+    });
+%}
+
+
+### 5.2 [未登录场景] 游客不带 Token 查看大屏指标 -> 预期 401 拦截
+GET {{baseUrl}}/api/stats/summary
+
+> {%
+    client.test("未登录拦截大屏", function() {
+        client.assert(response.status === 401, "必须登录才能拉取看板数据");
+    });
+%}
+
+
+
+### ====================================================================
+### 接口 6: GET /api/stats/hot-assets (热门借调排行榜)
+### ====================================================================
+
+### 6.1 [正常用例] 管理员调取借用频次最高的 Top5 物资 -> 预期 200 返回借阅排行列表
+GET {{baseUrl}}/api/stats/hot-assets?limit=5
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("热门借调排行返回正常", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+        client.assert(Array.isArray(response.body), "返回值应为数组");
+        if (response.body.length > 0) {
+            client.assert(response.body[0].borrow_count >= 1, "榜首借用次数应大于等于1");
+        }
+    });
+%}
+
+
+### 6.2 [越权拦截] 普通学生调取采购决策数据 -> 预期 403 权限拒绝 (仅限管理员)
+GET {{baseUrl}}/api/stats/hot-assets
+Authorization: Bearer {{student_a_token}}
+
+> {%
+    client.test("普通学生被403拦截", function() {
+        client.assert(response.status === 403, "采购决策排行仅限管理员查看");
+    });
+%}
+
+
+
+### ====================================================================
+### 接口 7: DELETE /api/auth/users/{user_id} (管理员删除/注销用户)
+### ====================================================================
+
+### 7.1 [准备工作] 管理员先录入一个待删除的临时学生账号 -> 预期 200 成功
+POST {{baseUrl}}/api/auth/register
+Content-Type: application/json
+Authorization: Bearer {{admin_token}}
+
+{
+  "username": "待注销离校学生",
+  "student_id": "20209999",
+  "password": "password123",
+  "role": "USER",
+  "department": "毕业生测试专业",
+  "contact": "010-0000-0000"
+}
+
+> {%
+    client.test("临时用户录入成功", function() {
+        client.assert(response.status === 200, "状态码应为 200");
+    });
+    client.global.set("temp_delete_user_id", response.body.id);
+%}
+
+
+### 7.2 [越权拦截] 普通学生尝试删除用户 -> 预期 403 权限拒绝 (仅限管理员)
+DELETE {{baseUrl}}/api/auth/users/{{temp_delete_user_id}}
+Authorization: Bearer {{student_a_token}}
+
+> {%
+    client.test("普通学生删除被403拦截", function() {
+        client.assert(response.status === 403, "普通学生禁止删除用户");
+    });
+%}
+
+
+### 7.3 [自删拦截] 管理员尝试删除自己当前登录中的账号 (id=1) -> 预期 400 拦截
+DELETE {{baseUrl}}/api/auth/users/1
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("禁止管理员自删账号", function() {
+        client.assert(response.status === 400, "不能删除当前登录的管理员");
+    });
+%}
+
+
+### 7.4 [业务拦截] 尝试删除尚有未归还设备的学生 (测试学生A id=2，在借树莓派) -> 预期 400 拦截
+DELETE {{baseUrl}}/api/auth/users/2
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("未归还设备用户禁止删除", function() {
+        client.assert(response.status === 400, "必须先归还全部借用设备");
+    });
+%}
+
+
+### 7.5 [正常用例] 管理员成功删除/注销临时学生账号 -> 预期 200 成功
+DELETE {{baseUrl}}/api/auth/users/{{temp_delete_user_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("管理员成功删除用户", function() {
+        client.assert(response.status === 200, "删除应返回 200");
+    });
+%}
+
